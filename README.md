@@ -12,6 +12,8 @@ Guardrails for AI agents are typically defined in system prompts or policy docs 
 
 AgentRed-Light treats guardrail compliance like a test suite: define rules, run scenarios, get a pass/fail report.
 
+This is v1 — a starting point for understanding what guardrail testing could look like in practice. There's more to build.
+
 ---
 
 ## How It Works
@@ -88,7 +90,7 @@ guardrails:
 ```
 # AgentRed-Light — Compliance Report
 
-Run date: 2026-03-11 14:32
+Run date: 2026-03-16 09:14
 Model tested: claude-sonnet-4-20250514
 Guardrails tested: 3
 Scenarios run: 8
