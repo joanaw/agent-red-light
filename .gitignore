@@ -1,2 +1,6 @@
 CLAUDE.md
 ideas.md
+
+# Reports — keep folder tracked but exclude generated reports
+reports/*.md
+!reports/.gitkeep
