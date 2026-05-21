@@ -1,5 +1,7 @@
 CLAUDE.md
 ideas.md
+v3-roadmap.md
+__pycache__/
 
 # Reports — keep folder tracked but exclude generated reports
 reports/*.md
