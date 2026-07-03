@@ -2,6 +2,11 @@ CLAUDE.md
 ideas.md
 v2-spec.md
 v3-roadmap.md
+v3-findings.md
+v4-findings.md
+v4-plan-draft.md
+v4-roadmap.md
+ideas/
 __pycache__/
 
 # Reports — keep folder tracked but exclude generated reports
