@@ -1,11 +1,14 @@
-CLAUDE.md
-ideas.md
-v2-spec.md
-v3-roadmap.md
-v3-findings.md
-v4-findings.md
-v4-plan-draft.md
-v4-roadmap.md
+# Internal docs — only README.md and README-v1-archive.md are public.
+# Blanket-ignore .md in the project root rather than listing files one by
+# one: the explicit list (CLAUDE.md, v3-findings.md, v4-findings.md, ...)
+# had to be hand-updated every time a new internal doc was created, and
+# five new ones (v5-action-plan.md, v5-improvement-proposals.md,
+# fable5-value-assessment.md, github-stats-log.md,
+# v3-v4-findings-dependency-map.md) were missed this way on 2026-07-29 —
+# caught only by checking `git status` before a push, not by this file.
+*.md
+!README.md
+!README-v1-archive.md
 ideas/
 __pycache__/
 
