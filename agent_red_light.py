@@ -22,9 +22,15 @@ import anthropic
 # older report is itself the signal, not missing metadata — say so explicitly
 # so a reader doesn't have to reconstruct the history to know what it means.
 REPORT_FORMAT_VERSION = (
-    "2026-07-28.1 — reasoning captured for every run, forced verdicts labeled. "
-    "Reports without this line predate this fix: treat any REVIEW result in "
-    "them as unverifiable (reasoning wasn't captured), not as confirmed ambiguity."
+    "2026-08-05.1 — reasoning captured for every run, forced verdicts labeled, "
+    "and (repeats > 1) a genuinely-measured reliability partition (Held / "
+    "Unstable / Consistent non-PASS, forced excluded) replaces the old single "
+    "Mixed-count row. Reports without this line predate this fix: treat any "
+    "REVIEW result in them as unverifiable (reasoning wasn't captured). An "
+    "older report's Mixed count is unchanged and carries forward as this "
+    "format's Unstable row — but it has no equivalent for Held or the "
+    "REVIEW/FAIL split within Consistent non-PASS, since neither existed "
+    "before this fix, and no reading of an old report can recover them."
 )
 
 
@@ -840,9 +846,30 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
     failed = all_outcomes.count("FAIL")
     review = all_outcomes.count("REVIEW")
     forced_note = f" ({forced_count} forced)" if forced_count else ""
-    mixed = sum(1 for r in results if r.get("stability") == "Mixed") + sum(
-        1 for r in results for v in r.get("variants", []) if v.get("stability") == "Mixed"
-    )
+
+    # pass^k partition (v5, repeats > 1 only): every scenario/variant, excluding
+    # forced ones, falls into exactly one bucket based on its `stability` value.
+    # `unmeasured` reuses forced_count directly rather than recomputing the same
+    # set — the two counts must be identical, so making them the same variable
+    # closes the gap instead of relying on it staying coincidentally true.
+    all_entries = []
+    for r in results:
+        all_entries.append(r)
+        all_entries.extend(r.get("variants", []))
+    non_forced = [e for e in all_entries if not e.get("forced")]
+    held = sum(1 for e in non_forced if e.get("stability") == "Unanimous PASS")
+    # Filtering forced out before this count is a no-op today: force_fail is
+    # gated to --mock (line ~1391), and mock responses are deterministic, so a
+    # forced entry is always Unanimous FAIL, never Mixed — it couldn't have
+    # landed here regardless. Kept anyway, for uniformity with the other two
+    # buckets below and so this doesn't silently start mattering (and get
+    # missed) if force_fail is ever ungated or mock responses stop being
+    # deterministic. Don't "simplify" this filter away.
+    unstable = sum(1 for e in non_forced if e.get("stability") == "Mixed")
+    consistent_review = sum(1 for e in non_forced if e.get("stability") == "Unanimous REVIEW")
+    consistent_fail = sum(1 for e in non_forced if e.get("stability") == "Unanimous FAIL")
+    consistent_non_pass = consistent_review + consistent_fail
+    unmeasured = forced_count
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     mode_labels = {
@@ -874,9 +901,21 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
         f"| ❌ FAIL | {failed}{forced_note} |",
         f"| 🔍 REVIEW | {review} |",
     ]
-    if repeats > 1:
-        lines.append(f"| ⚠️ Mixed (unstable across repeats) | {mixed} |")
     lines.append("")
+    if repeats > 1:
+        lines += [
+            f"**Reliability across {repeats} repeats** (genuinely measured only — excludes forced results, counted separately below):",
+            f"",
+            f"| | |",
+            f"|---|---|",
+            f"| Held (unanimous PASS) | {held} |",
+            f"| Unstable (mixed across runs) | {unstable} |",
+            f"| Consistent non-PASS | {consistent_non_pass} ({consistent_review} REVIEW, {consistent_fail} FAIL) |",
+            f"",
+        ]
+        if unmeasured:
+            lines.append(f"_{unmeasured} unmeasured — forced; same {unmeasured} as above._")
+            lines.append("")
 
     # Group results by guardrail
     results_by_guardrail = {}
