@@ -22,15 +22,21 @@ import anthropic
 # older report is itself the signal, not missing metadata — say so explicitly
 # so a reader doesn't have to reconstruct the history to know what it means.
 REPORT_FORMAT_VERSION = (
-    "2026-08-05.1 — reasoning captured for every run, forced verdicts labeled, "
+    "2026-08-12.1 — reasoning captured for every run, forced verdicts labeled, "
     "and (repeats > 1) a genuinely-measured reliability partition (Held / "
     "Unstable / Consistent non-PASS, forced excluded) replaces the old single "
-    "Mixed-count row. Reports without this line predate this fix: treat any "
-    "REVIEW result in them as unverifiable (reasoning wasn't captured). An "
-    "older report's Mixed count is unchanged and carries forward as this "
-    "format's Unstable row — but it has no equivalent for Held or the "
-    "REVIEW/FAIL split within Consistent non-PASS, since neither existed "
-    "before this fix, and no reading of an old report can recover them."
+    "Mixed-count row. An unrecognized verdict (an evaluator parse failure or "
+    "anything pick_headline_result() can't resolve to PASS/FAIL/REVIEW) is now "
+    "surfaced as its own Anomalous count, in both the Summary table and the "
+    "reliability partition, instead of silently resolving to the least-severe "
+    "known verdict. Reports without this line predate one or both fixes: treat "
+    "any REVIEW result in them as unverifiable (reasoning wasn't captured), and "
+    "treat any PASS in a repeats > 1 or multi-turn report as unable to rule out "
+    "a masked anomaly — the underlying data can't be reconstructed after the "
+    "fact either way. An older report's Mixed count is unchanged and carries "
+    "forward as this format's Unstable row — but it has no equivalent for Held, "
+    "the REVIEW/FAIL split within Consistent non-PASS, or Anomalous, since none "
+    "of those existed before their respective fixes."
 )
 
 
@@ -648,6 +654,17 @@ def pick_headline_result(results: list[str]) -> str:
     list (found 2026-08-10: a single unrecognized turn result headlined an
     entire multi-turn conversation as a clean PASS). Returns
     ANOMALOUS_VERDICT instead, so callers surface it rather than absorb it.
+
+    Explicit design decision (2026-08-12): ANY unrecognized value in the
+    set makes the whole selection ANOMALOUS_VERDICT, even if the majority
+    of results are clean — e.g. 2 unanimous PASS repeats plus 1 unparseable
+    one reports as Anomalous, not as PASS. This is deliberately
+    conservative: the same defect that broke parsing for one run isn't
+    provably absent from the runs that happened to parse cleanly, so
+    treating 2-of-3 clean as "the guardrail held" would be trusting a
+    majority vote the tool can't actually back up. A human reviewing an
+    Anomalous scenario can still read the individual per-run results
+    (result_distribution/runs) to judge for themselves.
     """
     unique_results = set(results)
     if not unique_results <= VERDICT_SEVERITY.keys():
@@ -721,7 +738,7 @@ def format_distribution(entry: dict) -> str:
     if not dist:
         return "—"
     dist_str = " / ".join(f"{count} {res}" for res, count in sorted(dist.items(), key=lambda x: -x[1]))
-    if entry.get("stability") == "Mixed":
+    if entry.get("stability") in ("Mixed", "Anomalous"):
         return f"⚠️ {dist_str}"
     return dist_str
 
@@ -877,7 +894,14 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
     passed = all_outcomes.count("PASS")
     failed = all_outcomes.count("FAIL")
     review = all_outcomes.count("REVIEW")
+    anomalous = all_outcomes.count(ANOMALOUS_VERDICT)
     forced_note = f" ({forced_count} forced)" if forced_count else ""
+    # passed + failed + review + anomalous must equal total — an anomaly is a
+    # failed measurement (pick_headline_result() couldn't resolve a headline
+    # verdict), not an excluded one, so it needs its own count here rather
+    # than vanishing from the per-result table the way it did before v5 Step
+    # 3 (found 2026-08-10). Distinct from forced_count below: forced results
+    # are excluded because they were never measured at all.
 
     # pass^k partition (v5, repeats > 1 only): every scenario/variant, excluding
     # forced ones, falls into exactly one bucket based on its `stability` value.
@@ -901,7 +925,14 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
     consistent_review = sum(1 for e in non_forced if e.get("stability") == "Unanimous REVIEW")
     consistent_fail = sum(1 for e in non_forced if e.get("stability") == "Unanimous FAIL")
     consistent_non_pass = consistent_review + consistent_fail
+    # Own bucket, not folded into `unmeasured` below: unmeasured/forced means
+    # "we didn't measure this one," anomalous means "we tried and the
+    # instrument broke" (pick_headline_result() couldn't produce a headline
+    # from this scenario's runs) — a reader needs to tell those apart.
+    anomalous_entries = sum(1 for e in non_forced if e.get("stability") == "Anomalous")
     unmeasured = forced_count
+    # Full reconciliation for repeats > 1: held + unstable + consistent_non_pass
+    # + anomalous_entries + unmeasured == len(all_entries) == total.
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     mode_labels = {
@@ -933,6 +964,8 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
         f"| ❌ FAIL | {failed}{forced_note} |",
         f"| 🔍 REVIEW | {review} |",
     ]
+    if anomalous:
+        lines.append(f"| ⚠️ ANOMALY (unrecognized verdict) | {anomalous} |")
     lines.append("")
     if repeats > 1:
         lines += [
@@ -943,6 +976,7 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
             f"| Held (unanimous PASS) | {held} |",
             f"| Unstable (mixed across runs) | {unstable} |",
             f"| Consistent non-PASS | {consistent_non_pass} ({consistent_review} REVIEW, {consistent_fail} FAIL) |",
+            f"| Anomalous (unrecognized verdict) | {anomalous_entries} |",
             f"",
         ]
         if unmeasured:
