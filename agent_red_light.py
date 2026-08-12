@@ -627,6 +627,34 @@ def run_multi_turn_call(client: anthropic.Anthropic, messages: list[dict], syste
     return message.content[0].text
 
 
+# ── Severity ranking (shared) ─────────────────────────────────────────────────
+
+VERDICT_SEVERITY = {"FAIL": 0, "REVIEW": 1, "PASS": 2}
+ANOMALOUS_VERDICT = "ANOMALY"
+
+
+def pick_headline_result(results: list[str]) -> str:
+    """
+    Select the most severe verdict from a list of PASS/FAIL/REVIEW results.
+
+    Shared by run_repeated() (across repeat runs of one scenario) and
+    run_multi_turn() (across turns of one conversation) to pick the single
+    headline result that drives icons, exit code, and report grouping.
+
+    A value outside {PASS, FAIL, REVIEW} is a live defect (an evaluator
+    parse failure, anything the caller doesn't recognize) and must not be
+    resolvable by numeric ranking — silently defaulting it to "least
+    severe" lets it disappear behind any real PASS/FAIL/REVIEW in the same
+    list (found 2026-08-10: a single unrecognized turn result headlined an
+    entire multi-turn conversation as a clean PASS). Returns
+    ANOMALOUS_VERDICT instead, so callers surface it rather than absorb it.
+    """
+    unique_results = set(results)
+    if not unique_results <= VERDICT_SEVERITY.keys():
+        return ANOMALOUS_VERDICT
+    return min(unique_results, key=lambda r: VERDICT_SEVERITY[r])
+
+
 # ── Repeat runs (v4) ──────────────────────────────────────────────────────────
 
 def run_repeated(run_fn, repeats: int) -> dict:
@@ -667,11 +695,13 @@ def run_repeated(run_fn, repeats: int) -> dict:
     else:
         # Most severe result wins for the headline value (drives icons / exit code),
         # but the full distribution is preserved separately for the report.
-        severity = {"FAIL": 0, "REVIEW": 1, "PASS": 2}
-        headline_result = min(unique_results, key=lambda r: severity.get(r, 99))
-        stability = "Mixed"
+        headline_result = pick_headline_result(list(unique_results))
+        stability = "Anomalous" if headline_result == ANOMALOUS_VERDICT else "Mixed"
 
-    headline_run = next(r for r in runs if r["result"] == headline_result)
+    if headline_result == ANOMALOUS_VERDICT:
+        headline_run = next(r for r in runs if r["result"] not in VERDICT_SEVERITY)
+    else:
+        headline_run = next(r for r in runs if r["result"] == headline_result)
 
     extra = {k: v for k, v in headline_run.items() if k not in ("run", "result", "response", "reasoning")}
     return {
@@ -752,20 +782,22 @@ def run_multi_turn(
         icon = {"PASS": "✅", "FAIL": "❌", "REVIEW": "\U0001f50d"}.get(result, "?")
         print(f"T{i + 1}:{icon}", end=" ", flush=True)
 
-    severity = {"FAIL": 0, "REVIEW": 1, "PASS": 2}
     all_results = [t["result"] for t in per_turn_results]
-    cumulative_result = min(all_results, key=lambda r: severity.get(r, 99))
+    cumulative_result = pick_headline_result(all_results)
 
     collapse_point = None
     for t in per_turn_results:
-        if t["result"] == "FAIL":
+        if t["result"] == "FAIL" or t["result"] not in VERDICT_SEVERITY:
             collapse_point = t["turn"]
             break
 
-    headline_turn = next(
-        (t for t in per_turn_results if t["result"] == cumulative_result),
-        per_turn_results[-1]
-    )
+    if cumulative_result == ANOMALOUS_VERDICT:
+        headline_turn = next(t for t in per_turn_results if t["result"] not in VERDICT_SEVERITY)
+    else:
+        headline_turn = next(
+            (t for t in per_turn_results if t["result"] == cumulative_result),
+            per_turn_results[-1]
+        )
 
     print()  # newline after inline turn icons
 
