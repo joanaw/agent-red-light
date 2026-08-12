@@ -672,6 +672,30 @@ def pick_headline_result(results: list[str]) -> str:
     return min(unique_results, key=lambda r: VERDICT_SEVERITY[r])
 
 
+def decide_exit_code(non_forced_failed: int, anomalous: int) -> int:
+    """
+    Exit code contract (v5 Step 3, item 4). Three distinct codes, not two:
+    a genuine guardrail FAIL is a statement about the agent; an anomaly is
+    a statement about the tool (pick_headline_result() couldn't resolve a
+    headline verdict). Collapsing them into one non-zero code would put a
+    CI operator seeing red in the position of investigating the wrong
+    system. Forced (force_fail) results are demonstration-only and were
+    never a measurement, so they must already be excluded from
+    non_forced_failed before calling this.
+
+      0 — clean
+      1 — a genuine (non-forced) guardrail FAIL, no anomaly present
+      2 — an anomalous (unrecognized-verdict) result present, regardless
+          of FAIL count — a run containing one can't be trusted to have
+          correctly counted the FAILs either, so it takes precedence
+    """
+    if anomalous > 0:
+        return 2
+    if non_forced_failed > 0:
+        return 1
+    return 0
+
+
 # ── Repeat runs (v4) ──────────────────────────────────────────────────────────
 
 def run_repeated(run_fn, repeats: int) -> dict:
@@ -1601,20 +1625,27 @@ def main():
         f.write(report)
 
     all_outcomes = []
+    non_forced_outcomes = []
     forced_count = 0
     for r in results:
         all_outcomes.append(r["result"])
         if r.get("forced"):
             forced_count += 1
+        else:
+            non_forced_outcomes.append(r["result"])
         for v in r.get("variants", []):
             all_outcomes.append(v["result"])
             if v.get("forced"):
                 forced_count += 1
+            else:
+                non_forced_outcomes.append(v["result"])
 
     passed = all_outcomes.count("PASS")
     failed = all_outcomes.count("FAIL")
     review = all_outcomes.count("REVIEW")
+    anomalous = all_outcomes.count(ANOMALOUS_VERDICT)
     forced_note = f" ({forced_count} forced)" if forced_count else ""
+    anomaly_note = f" · {anomalous} ANOMALY" if anomalous else ""
 
     print(f"Report saved to {args.output}")
 
@@ -1628,11 +1659,17 @@ def main():
             f.write(verbose_report)
         print(f"Verbose report saved to {verbose_path}")
 
-    print(f"\nResults: {passed} PASS · {failed}{forced_note} FAIL · {review} REVIEW")
+    print(f"\nResults: {passed} PASS · {failed}{forced_note} FAIL · {review} REVIEW{anomaly_note}")
 
-    # Exit with non-zero code if any FAILs detected — enables CI/CD pipeline integration
-    if failed > 0:
-        sys.exit(1)
+    # Note: excluding forced results does not by itself make the documented
+    # --mock --scenarios-dir scenarios/ quickstart exit 0. Several shipped
+    # scenarios (e.g. fin-001-guilt, cs-001-guilt, fin-mt-001) are
+    # hand-authored to FAIL in mock mode by design, independent of
+    # force_fail — see CLAUDE.md Known Gaps, restated 2026-08-12.
+    non_forced_failed = non_forced_outcomes.count("FAIL")
+    exit_code = decide_exit_code(non_forced_failed, anomalous)
+    if exit_code:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
