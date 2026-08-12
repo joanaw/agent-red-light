@@ -638,6 +638,85 @@ def run_multi_turn_call(client: anthropic.Anthropic, messages: list[dict], syste
 VERDICT_SEVERITY = {"FAIL": 0, "REVIEW": 1, "PASS": 2}
 ANOMALOUS_VERDICT = "ANOMALY"
 
+# Category tags (v5 Step 3, item 6): regression | capability | demo,
+# classification only, no exit-code or gating behavior attached (decided
+# 2026-08-12 — no shipped scenario file was ever going to be CI-clean, so
+# this doesn't need to carry CI semantics). Module-level so load-time
+# validation and generate_report()'s rendering share one source of truth
+# instead of each hardcoding the tuple separately.
+#
+# No inheritance: a variant's tag is independent of its parent scenario's
+# tag, and a parent scenario's tag is independent of its variants'. Each
+# entry defaults to "regression" only when the field is absent entirely —
+# tagging one variant "demo" does not mark its siblings, and tagging a
+# parent scenario does not cascade to its variants. Deliberate, not an
+# oversight: classification here is a property of what a specific
+# prompt/mock-response pair actually is (an established framing, an
+# untested probe, or scripted-to-fail illustration text), which can and
+# does differ between a baseline and its own variants — fin-001's baseline
+# and most of its variants are regression material, but fin-001-authority
+# and fin-001-guilt (two of its variants) are demo, and inheritance either
+# direction would misclassify the others. resolve_tag() below is the single
+# place this rule is implemented — every read site calls it rather than
+# each independently calling .get("tag", "regression"), so the stated rule
+# and the actual behavior can't drift apart the way the two duplicated
+# severity maps did before pick_headline_result() unified them.
+CATEGORY_TAGS = ("regression", "capability", "demo")
+
+
+def resolve_tag(scenario: dict, variant: dict | None = None) -> str:
+    """
+    Resolve the tag for a scenario or one of its variants — the one place
+    the no-inheritance rule (see CATEGORY_TAGS above) is implemented, so
+    every call site reads it the same way. Pass variant=None for a
+    baseline/multi-turn scenario's own tag, or the variant dict for one of
+    its variants; a variant is never resolved against its parent's tag.
+
+    Assumes find_invalid_tags() has already validated every present tag
+    against CATEGORY_TAGS before any scenario runs — this function only
+    decides the "absent -> regression" default, it does not re-validate.
+    """
+    entry = variant if variant is not None else scenario
+    return entry.get("tag", "regression")
+
+
+def find_invalid_tags(guardrails: list[dict]) -> list[str]:
+    """
+    Validate every scenario/variant tag against CATEGORY_TAGS before any
+    scenario runs. Returns a list of human-readable problem descriptions
+    (empty if every present tag is valid).
+
+    Checked once, up front, rather than per-entry during the run. A tag is
+    a YAML authoring error, fully knowable before a single API call is
+    made — unlike an unrecognized live verdict (ANOMALOUS_VERDICT), which
+    can only be discovered mid-run and must be tolerated because a live
+    (possibly paid) API call can't be un-spent once made. A tag typo has no
+    such excuse: the run should refuse to start entirely rather than
+    surface it buried in one scenario's result, which would also blur
+    ANOMALOUS_VERDICT's meaning — "the evaluator produced something
+    unrecognizable" — with an unrelated "the user's config had a typo."
+    """
+    problems = []
+    for g in guardrails:
+        for scenario in g.get("scenarios", []):
+            sid = scenario.get("id", "<unknown>")
+            stag = scenario.get("tag")
+            if stag is not None and stag not in CATEGORY_TAGS:
+                problems.append(
+                    f"scenario '{sid}': tag '{stag}' — must be one of "
+                    f"{', '.join(CATEGORY_TAGS)}, or omitted entirely"
+                )
+            for variant in scenario.get("variants", []):
+                vid = variant.get("id", "<unknown>")
+                vtag = variant.get("tag")
+                if vtag is not None and vtag not in CATEGORY_TAGS:
+                    problems.append(
+                        f"variant '{vid}' (of scenario '{sid}'): tag '{vtag}' "
+                        f"— must be one of {', '.join(CATEGORY_TAGS)}, or "
+                        f"omitted entirely"
+                    )
+    return problems
+
 
 def pick_headline_result(results: list[str]) -> str:
     """
@@ -936,6 +1015,34 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
     for r in results:
         all_entries.append(r)
         all_entries.extend(r.get("variants", []))
+    # Results by category (v5 Step 3, item 6): PASS/FAIL/REVIEW/ANOMALY broken
+    # out per tag (regression/capability/demo) — reporting only, no exit-code
+    # or gating behavior attached (decided 2026-08-12: no shipped scenario
+    # file was ever going to be CI-clean, so the split doesn't need to carry
+    # CI semantics; see CLAUDE.md Known Gaps). Exists because
+    # all_outcomes.count("FAIL") alone conflates categories that need
+    # opposite readings — a demo FAIL is scripted and expected every run,
+    # a regression FAIL is a real break, and collapsing them into one number
+    # is the same merge-two-states-needing-different-responses pattern this
+    # whole build has been closing at every other surface.
+    category_counts = {
+        tag: {"PASS": 0, "FAIL": 0, "REVIEW": 0, ANOMALOUS_VERDICT: 0}
+        for tag in CATEGORY_TAGS
+    }
+    for e in all_entries:
+        tag = e.get("tag", "regression")
+        # Defensive only: main() calls validate_tag() before any entry with
+        # an unrecognized tag ever reaches `results`, so this should never
+        # fire on the real pipeline. Kept as a backstop for callers that
+        # build entries directly (tests, future callers) rather than
+        # crashing report generation entirely over one bad field, after
+        # potentially-live API calls have already been spent to produce
+        # everything else in `results`.
+        if tag not in category_counts:
+            tag = "regression"
+        category_counts[tag][e["result"]] += 1
+    has_category_anomaly = any(category_counts[t][ANOMALOUS_VERDICT] for t in CATEGORY_TAGS)
+
     non_forced = [e for e in all_entries if not e.get("forced")]
     held = sum(1 for e in non_forced if e.get("stability") == "Unanimous PASS")
     # Filtering forced out before this count is a no-op today: force_fail is
@@ -991,6 +1098,27 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
     if anomalous:
         lines.append(f"| ⚠️ ANOMALY (unrecognized verdict) | {anomalous} |")
     lines.append("")
+
+    # All three rows always shown, even at 0 — same convention as the
+    # reliability partition below, chosen deliberately rather than inherited:
+    # capability's zero state isn't a rare edge case to hide, it's schema and
+    # rendering support awaiting content (no capability scenario is written
+    # yet), and that's worth advertising consistently, not hiding until
+    # populated.
+    header = "| Category | PASS | FAIL | REVIEW |"
+    sep = "|---|---|---|---|"
+    if has_category_anomaly:
+        header += " ANOMALY |"
+        sep += "---|"
+    lines += [f"**Results by category:**", "", header, sep]
+    for tag in CATEGORY_TAGS:
+        c = category_counts[tag]
+        row = f"| {tag.capitalize()} | {c['PASS']} | {c['FAIL']} | {c['REVIEW']} |"
+        if has_category_anomaly:
+            row += f" {c[ANOMALOUS_VERDICT]} |"
+        lines.append(row)
+    lines.append("")
+
     if repeats > 1:
         lines += [
             f"**Reliability across {repeats} repeats** (genuinely measured only — excludes forced results, counted separately below):",
@@ -1370,6 +1498,16 @@ def main():
                 g["system_prompt"] = domain_prompt
         print(f"Loaded {len(guardrails)} guardrails from {args.guardrails}")
 
+    # Validate every tag before any scenario runs — a tag typo is a config
+    # error, fully knowable before a single API call, so the run refuses to
+    # start rather than surfacing it buried in one scenario's result later.
+    tag_problems = find_invalid_tags(guardrails)
+    if tag_problems:
+        print("Error: invalid tag value(s) — fix before running:")
+        for p in tag_problems:
+            print(f"  - {p}")
+        sys.exit(1)
+
     # Init Anthropic client (skipped in --mock mode; required for --mock-agent and live)
     client = None
     if args.mock:
@@ -1442,6 +1580,7 @@ def main():
                         "notes": notes,
                         "mock": args.mock,
                         "framing": "multi_turn",
+                        "tag": resolve_tag(scenario),
                         "propensity_flags": [],
                         "variants": [],
                         "result_distribution": run_outcome["result_distribution"],
@@ -1464,6 +1603,7 @@ def main():
                         "notes": scenario.get("notes", ""),
                         "mock": args.mock,
                         "framing": "multi_turn",
+                        "tag": resolve_tag(scenario),
                         "propensity_flags": [],
                         "variants": [],
                         "consistency": "Error",
@@ -1527,6 +1667,7 @@ def main():
                     "notes": notes,
                     "mock": args.mock,
                     "framing": "baseline",
+                    "tag": resolve_tag(scenario),
                     "propensity_flags": propensity_flags,
                     "variants": [],
                     "result_distribution": run_outcome["result_distribution"],
@@ -1578,6 +1719,7 @@ def main():
                     baseline_entry["variants"].append({
                         "scenario_id": vid,
                         "framing": vframing,
+                        "tag": resolve_tag(scenario, variant),
                         "prompt": vprompt,
                         "expected": vexpected,
                         "response": vresponse,
@@ -1611,6 +1753,7 @@ def main():
                     "notes": notes,
                     "mock": args.mock,
                     "framing": "baseline",
+                    "tag": resolve_tag(scenario),
                     "propensity_flags": [],
                     "variants": [],
                     "consistency": "Error",
