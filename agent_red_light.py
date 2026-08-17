@@ -25,18 +25,24 @@ REPORT_FORMAT_VERSION = (
     "2026-08-12.1 — reasoning captured for every run, forced verdicts labeled, "
     "and (repeats > 1) a genuinely-measured reliability partition (Held / "
     "Unstable / Consistent non-PASS, forced excluded) replaces the old single "
-    "Mixed-count row. An unrecognized verdict (an evaluator parse failure or "
-    "anything pick_headline_result() can't resolve to PASS/FAIL/REVIEW) is now "
+    "Mixed-count row. Each scenario's tag (regression / capability / demo) is "
+    "broken out into its own Results-by-category table, so a demo-tag scripted "
+    "failure is never summed into the same count as a regression failure. An "
+    "unrecognized verdict (anything pick_headline_result() can't resolve to "
+    "PASS/FAIL/REVIEW — an evaluator parse failure falls back to REVIEW, not "
+    "this) is now "
     "surfaced as its own Anomalous count, in both the Summary table and the "
     "reliability partition, instead of silently resolving to the least-severe "
-    "known verdict. Reports without this line predate one or both fixes: treat "
-    "any REVIEW result in them as unverifiable (reasoning wasn't captured), and "
-    "treat any PASS in a repeats > 1 or multi-turn report as unable to rule out "
-    "a masked anomaly — the underlying data can't be reconstructed after the "
-    "fact either way. An older report's Mixed count is unchanged and carries "
-    "forward as this format's Unstable row — but it has no equivalent for Held, "
-    "the REVIEW/FAIL split within Consistent non-PASS, or Anomalous, since none "
-    "of those existed before their respective fixes."
+    "known verdict. Reports without this line predate one or more of these "
+    "fixes: treat any REVIEW result in them as unverifiable (reasoning wasn't "
+    "captured), treat any PASS in a repeats > 1 or multi-turn report as unable "
+    "to rule out a masked anomaly, and treat any FAIL/PASS count as an "
+    "undifferentiated mix of demo and regression scenarios — the underlying "
+    "data can't be reconstructed after the fact either way. An older report's "
+    "Mixed count is unchanged and carries forward as this format's Unstable "
+    "row — but it has no equivalent for Held, the REVIEW/FAIL split within "
+    "Consistent non-PASS, Anomalous, or the category breakdown, since none of "
+    "those existed before their respective fixes."
 )
 
 
@@ -726,8 +732,9 @@ def pick_headline_result(results: list[str]) -> str:
     run_multi_turn() (across turns of one conversation) to pick the single
     headline result that drives icons, exit code, and report grouping.
 
-    A value outside {PASS, FAIL, REVIEW} is a live defect (an evaluator
-    parse failure, anything the caller doesn't recognize) and must not be
+    A value outside {PASS, FAIL, REVIEW} — anything a caller returns that
+    this closed set doesn't recognize (not an evaluator parse failure,
+    which falls back to REVIEW before ever reaching here) — must not be
     resolvable by numeric ranking — silently defaulting it to "least
     severe" lets it disappear behind any real PASS/FAIL/REVIEW in the same
     list (found 2026-08-10: a single unrecognized turn result headlined an
@@ -978,6 +985,37 @@ def consistency_is_forced(baseline_entry: dict) -> bool:
 
 
 # ── Report generation ─────────────────────────────────────────────────────────
+
+# Every structural block generate_report() can emit, paired with the phrase
+# that must appear in REPORT_FORMAT_VERSION's description — or None if the
+# block predates format versioning and carries no version-specific guarantee.
+# Declared beside the function that renders these blocks, not in a diagnostic
+# script, so adding a new block forces a conscious label decision right where
+# the block is written, rather than a second hand-maintained list drifting
+# from the first — the same shape as resolve_tag()'s no-inheritance fix above.
+# ideas/diagnostic-report-format-description.py checks both directions: every
+# header the report actually emits must match an entry here (an unmapped
+# header fails, not passes silently), and every non-None entry's phrase must
+# appear in REPORT_FORMAT_VERSION (an undescribed label fails too). The
+# report's own emitted output is the source of truth; this dict is only the
+# header-text-to-keyword bridge, never asserted against itself.
+#
+# Every None here needs its own reason, not just "predates versioning" left
+# implicit — an unexplained None is indistinguishable from one added because
+# labeling it was skipped, which is the same silent-exemption risk this
+# registry exists to close one level up.
+REPORT_BLOCK_LABELS: dict[str, str | None] = {
+    # Present since v1 — predates REPORT_FORMAT_VERSION entirely, so there
+    # has never been a version claim for it to carry.
+    "## Summary": None,
+    "**Results by category:**": "category",
+    "**Reliability across": "reliability partition",  # prefix match — repeat count varies
+    # Same as "## Summary" above: v1, predates format versioning. Also the
+    # header-zone boundary marker used by the diagnostic's extraction —
+    # exempt from a description phrase, but not from being declared.
+    "## Results by Guardrail": None,
+}
+
 
 def generate_report(results: list[dict], guardrails: list[dict], run_mode: str = "live", repeats: int = 1) -> str:
     """Generate a markdown compliance report from test results."""
