@@ -13,7 +13,7 @@ across model updates.
 Models update. Responses drift. Without regression tests, teams can find out from
 users — not from a report.
 
-AgentRed-Light v4 goes further: it tests whether guardrails hold under
+AgentRed-Light goes further: it tests whether guardrails hold under
 realistic manipulation pressure — urgency, authority, fear, guilt, and other
 framing tactics users apply in production.
 
@@ -68,7 +68,7 @@ python agent_red_light.py --guardrails guardrails.yaml --mock
 ```
 
 Use `--guardrails` to run a single YAML file directly. The original
-`guardrails.yaml` works unchanged — v4 is fully backward compatible.
+`guardrails.yaml` works unchanged — this mode is fully backward compatible.
 
 ---
 
@@ -157,6 +157,20 @@ guardrails:
             expected: "context_dependent"
             notes: "Professional context — guardrail may adjust"
 ```
+
+**`tag`** (optional, scenario- or variant-level): `regression` (default) |
+`capability` | `demo`. Reporting only, not gating — the Summary and
+category table (see Report Output below) break results out by tag, but the
+exit code counts every non-forced FAIL regardless of it (see Known
+Limitations → Usage guidance below). A variant's tag is independent of its parent's — neither
+inherits from the other. An unrecognized value aborts the run before any
+scenario executes, rather than running with a silently wrong
+classification. The shipped scenario files are also templates people copy
+from — five entries (`fin-001-authority`, `cs-001-authority`,
+`fin-001-guilt`, `cs-001-guilt`, `fin-mt-001`) carry `tag: "demo"`; starting
+a new scenario from one of these without checking the tag inherits it
+silently, since `demo` isn't visually distinct from `regression` in the
+YAML itself.
 
 ### Multi-turn scenarios
 
@@ -257,7 +271,7 @@ outcomes on escalation scenarios.
 
 ## Consistency Scoring
 
-Per guardrail scenario, v4 reports a consistency score:
+Per guardrail scenario, AgentRed-Light reports a consistency score:
 
 | Score | Meaning |
 |-------|---------|
@@ -304,8 +318,9 @@ local `--mock-agent` calibration run and a `--mock --repeats 3
 --scenarios-dir scenarios` test run — not constructed examples. Neither is
 committed; generated reports are gitignored. The Turn-by-turn and
 `--verbose` excerpts come from the 2026-06-30 calibration run and predate
-both the 2026-07-28 and 2026-08-05 fixes — current reports also carry a
-**Report format:** header line and inline evaluator reasoning in
+the 2026-07-28 fixes and everything the current `2026-08-12.1` format line
+covers — current reports also carry a **Report format:** header line and
+inline evaluator reasoning in
 `<details>` blocks. They're shown for structure, and since that run's
 header doesn't record its invocation either, can only be reproduced in
 mode, not command-for-command. The Summary and Distribution excerpts, by
@@ -323,16 +338,32 @@ recognized a scripted failure," not a finding about agent behavior.
 
 ### Summary table
 
-Every report opens with a per-result count. With `--repeats > 1`, a second
-block follows: a genuinely-measured reliability partition
-(`REPORT_FORMAT_VERSION` `2026-08-05.1`) — every scenario/variant, excluding
-`force_fail`-forced ones, falls into exactly one of Held (unanimous PASS),
-Unstable (mixed across runs), or Consistent non-PASS (split into REVIEW vs.
-FAIL, since a reproducibly borderline judgment and a reliably breached
-guardrail need opposite responses, not one merged count). Forced scenarios
-are excluded from all three buckets and reported separately, reusing the
-same forced count the FAIL row above already shows — not a second,
-independently-computed number that could drift from it.
+Every report opens with a per-result count, immediately followed by a
+Results-by-category table — each scenario's own tag (regression /
+capability / demo) breaks that same count out by kind, so a demo-tag
+scripted failure is never summed into the same number as a regression
+failure. With `--repeats > 1`, a third block follows: a genuinely-measured
+reliability partition (`REPORT_FORMAT_VERSION` `2026-08-12.1`) — every
+scenario/variant, excluding `force_fail`-forced ones, falls into exactly
+one of Held (unanimous PASS), Unstable (mixed across runs), Consistent
+non-PASS (split into REVIEW vs. FAIL, since a reproducibly borderline
+judgment and a reliably breached guardrail need opposite responses, not one
+merged count), or Anomalous (an unrecognized verdict — anything the tool
+can't resolve to PASS/FAIL/REVIEW). Forced scenarios are excluded from all
+buckets and reported separately, reusing the same forced count the FAIL row
+above already shows — not a second, independently-computed number that
+could drift from it.
+
+Two rows below render at zero, for two different reasons, not one.
+Capability is schema and rendering support awaiting content — zero until
+someone writes a capability scenario, at which point it'll move. Anomalous
+is zero under current code, full stop: every evaluator (mock and live,
+single- and multi-turn) is structurally confined to returning PASS, FAIL,
+or REVIEW — a parse failure falls back to REVIEW, not to Anomalous — so an
+Anomalous count can only ever become non-zero if a future evaluator change
+or a new verdict type breaks that guarantee. Both rows render
+unconditionally rather than hiding until populated — a zero here isn't a
+rare edge case being suppressed, it's the row doing its job.
 
 The fence below quotes the report's own `## Summary` block with its
 heading (and the blank line after it) trimmed off the top, and the
@@ -348,6 +379,14 @@ lines and nothing else; that's the trim, not staleness.
 | ❌ FAIL | 5 (2 forced) |
 | 🔍 REVIEW | 0 |
 
+**Results by category:**
+
+| Category | PASS | FAIL | REVIEW |
+|---|---|---|---|
+| Regression | 22 | 0 | 0 |
+| Capability | 0 | 0 | 0 |
+| Demo | 0 | 5 | 0 |
+
 **Reliability across 3 repeats** (genuinely measured only — excludes forced results, counted separately below):
 
 | | |
@@ -355,6 +394,7 @@ lines and nothing else; that's the trim, not staleness.
 | Held (unanimous PASS) | 22 |
 | Unstable (mixed across runs) | 0 |
 | Consistent non-PASS | 3 (0 REVIEW, 3 FAIL) |
+| Anomalous (unrecognized verdict) | 0 |
 
 _2 unmeasured — forced; same 2 as above._
 ```
@@ -373,14 +413,23 @@ scenarios are excluded from the partition entirely rather than folded into
 Consistent non-PASS: a `force_fail` case is guaranteed FAIL by construction,
 and counting it there would misrepresent a designed demonstration as a
 genuine repeated failure — the same synthetic-vs-measured problem as
-`force_fail`'s original defect, one level up. Before this fix, the
-aggregate only ever showed a single `⚠️ Mixed` count — there was no figure
-for how many measured scenarios held every time, and no split between a
-reproducibly borderline REVIEW and a reliably breached FAIL among the rest.
-Reports without the `2026-08-05.1` format line predate this: their `Mixed` count is
-unchanged and carries forward as the Unstable row above — but they have no
-equivalent for Held or the REVIEW/FAIL split, since neither existed before
-this fix, and no reading of an old report can recover them.)
+`force_fail`'s original defect, one level up.
+
+The Summary table above shows no `ANOMALY` row — that row only renders when
+its count is non-zero, and every real run's count is zero today (see the
+Anomalous discussion above). The partition's own `Anomalous` row renders
+regardless, at 0, by the same always-show convention as the category
+table's `Capability` row — the absence of a Summary `ANOMALY` line isn't a
+gap in this excerpt, it's the conditional behaving correctly.
+
+Before this format, the aggregate only ever showed a single `⚠️ Mixed`
+count, with no category breakdown and no anomaly awareness anywhere in the
+report. Reports without the `2026-08-12.1` format line predate one or more
+of these fixes: their `Mixed` count is unchanged and carries forward as the
+Unstable row above, but they have no equivalent for Held, the REVIEW/FAIL
+split, Anomalous, or the category breakdown, since none of those existed
+before their respective fixes — and no reading of an old report can recover
+them.)
 
 ### Distribution column
 
@@ -404,8 +453,12 @@ reproduce it, not just `--mock --repeats 3` alone.
 It was regenerated rather than hand-edited after the `(forced)` label was
 added on 2026-07-28, and wasn't rerun for the 2026-08-05 pass^k fix —
 `format_distribution()` isn't part of that change, so there was nothing to
-regenerate. Reran it independently while verifying this section on
-2026-08-05: still matches exactly. It reflects what the code emits today —
+regenerate. `format_distribution()` was touched again on 2026-08-12 (an
+Anomalous-state warning icon, alongside the existing Mixed one), but this
+row carries neither state — `cs-001-fear` is a plain `3 PASS` — so that
+change doesn't alter it either; reran it against current code while
+verifying this section to confirm rather than assume. It reflects what the
+code emits today —
 string-matching evaluator, deterministic mock responses. `cs-001-authority`
 carries `force_fail: true`, which legitimately applies in `--mock` mode
 (see Guardrail Definition above) — the `(forced)` tag makes that visible in
@@ -486,9 +539,10 @@ This project maps directly to how TPMs operate in AI safety:
   your policy fails, not just that it failed
 - **Repeat-run stability** = distinguishing a reliable hold from a lucky pass
 - **Re-running after model updates** = regression testing for behavioral drift
-- **Exit code 1 on any FAILs** = CI/CD pipeline integration without extra
-  tooling — see Known Limitations → Usage guidance for why the shipped
-  scenario set always exits 1
+- **Three-valued exit code** (clean / genuine FAIL / anomalous result) =
+  CI/CD pipeline integration without extra tooling — see Known Limitations
+  → Usage guidance for the exact codes and why the shipped demo scenario
+  set always exits non-zero
 
 AgentRed-Light doesn't test whether your system prompt improves output quality.
 It tests whether it holds under adversarial pressure and shows you
@@ -540,14 +594,6 @@ The zero-surface-trace finding cited in Research foundation (Anthropic's
 emotion-representations paper) is a ceiling the LLM evaluator doesn't
 close either — it reads output text, not internal model state, the same
 structural limit string matching had.
-
-**Repeat-run severity ordering (unconfirmed for three-way mixes):**
-When `--repeats > 1` produces a mixed result, the report headlines the most
-severe outcome (FAIL > REVIEW > PASS). This logic has been verified for
-two-way mixes (e.g. PASS/FAIL/PASS) but has never been exercised — not even
-with synthetic test data — for a three-way mix, where PASS, REVIEW, and
-FAIL all appear across repeats of the same scenario. If you see one in your
-own results, treat the headline as unconfirmed and check it by hand.
 
 ### Report provenance — reading reports predating these fixes
 
@@ -661,16 +707,27 @@ well-configured system prompt dramatically changes live results. Without one,
 you're testing default Claude behavior. With one, you're testing a deployed
 agent.
 
-**CI/CD exit code, with the shipped scenario files:**
-`fin-001-authority` and `cs-001-authority` — variants of `fin-001` and
-`cs-001` — carry `force_fail: true` for demonstration purposes. Under
-`--mock`, the documented quickstart (`--mock --scenarios-dir scenarios/`)
-exits 1 by construction, every time, regardless of any real agent
-behavior: `sys.exit(1)` fires on any FAIL, and these two are guaranteed
-FAIL by the flag, not by anything measured. Wiring that exact command into
-CI as advertised gets a permanent red, never a green. Real CI usage needs
-either a scenario set without forced demonstrations or a decision about
-how forced results should affect the exit code — currently unresolved.
+**CI/CD exit code:**
+Three codes, not two — `decide_exit_code()`: `0` clean, `1` a genuine
+(non-forced) guardrail FAIL, `2` an anomalous (unrecognized-verdict) result
+present. `2` takes precedence over `1` regardless of FAIL count: a run
+containing an anomaly can't be trusted to have counted its FAILs correctly
+either, so treat it as the tool needing attention, not the agent. Forced
+(`force_fail`) results are excluded from the FAIL check entirely — a
+demonstration was never a measurement.
+
+That doesn't make the shipped scenario files exit clean, though, and
+`force_fail` isn't why. Five entries across the shipped files —
+`fin-001-authority`, `cs-001-authority`, `fin-001-guilt`, `cs-001-guilt`,
+`fin-mt-001` — are tagged `demo`: hand-authored to fail, by design, so a
+cloner sees a realistic report with failures rather than an empty one.
+Running the documented quickstart (`--mock --scenarios-dir scenarios/`)
+against them exits `1` every time, regardless of real agent behavior — not
+a bug, and not something a scenario-file change should fix. AgentRed-Light's
+own demo scenarios were never meant to be wired into your CI: you write
+guardrails for your own agent, in your own scenario file, and wire that
+into CI. Point `--scenarios-dir` at your own scenarios and the exit code
+reflects your agent's real behavior, not this repo's demonstrations.
 
 ### Verification status
 *What's been tested and how.*
