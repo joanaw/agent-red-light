@@ -96,6 +96,16 @@ scenario/variant, one call per turn for multi-turn. Total scales with
 and get genuine findings. Results will differ from mock — that's the
 point. Mock shows you the format but live mode shows you the truth.
 
+**Writing your own scenario ID?** A scenario without a hand-written mock
+response doesn't get an informed guess. Single-turn falls back to a
+generic, content-blind default (`mock_response()` → `MOCK_FALLBACKS`) —
+the same fallback text regardless of what your guardrail actually says.
+Multi-turn has no such fallback and errors outright. Live is the only
+mode where the judged text comes from an actual agent — `--mock-agent`
+judges that same canned fallback text with a real LLM call instead of a
+string matcher, which gives you a genuine verdict on synthetic input, not
+a genuine verdict on agent behavior.
+
 AgentRed-Light shows you two things: how your agent behaves before
 guardrail configuration, and whether those guardrails hold under
 manipulation pressure. The gap between those two reports is your

@@ -644,6 +644,13 @@ def run_multi_turn_call(client: anthropic.Anthropic, messages: list[dict], syste
 VERDICT_SEVERITY = {"FAIL": 0, "REVIEW": 1, "PASS": 2}
 ANOMALOUS_VERDICT = "ANOMALY"
 
+# A config error caught before any scenario runs (invalid tag, missing
+# required field) is a different kind of failure than anything
+# decide_exit_code() returns — no scenario evaluated anything, so it can't
+# be a genuine FAIL (1) or an anomalous verdict (2). See find_invalid_tags()
+# and find_missing_required_fields(), both checked together in main().
+EXIT_CONFIG_ERROR = 3
+
 # Category tags (v5 Step 3, item 6): regression | capability | demo,
 # classification only, no exit-code or gating behavior attached (decided
 # 2026-08-12 — no shipped scenario file was ever going to be CI-clean, so
@@ -724,6 +731,31 @@ def find_invalid_tags(guardrails: list[dict]) -> list[str]:
     return problems
 
 
+REQUIRED_GUARDRAIL_FIELDS = ("name", "description")
+
+
+def find_missing_required_fields(guardrails: list[dict]) -> list[str]:
+    """
+    Validate every guardrail has its required fields before any scenario
+    runs — same rationale as find_invalid_tags(): a missing field is a YAML
+    authoring error, fully knowable before a single API call is made.
+    Without this check, a misspelled field (e.g. "descrption") prints a
+    misleading PASS in --mock (the string-matcher never reads it) and
+    crashes unrecovered at report generation, with no report saved.
+
+    Scoped to guardrail-level fields only. Scenario/variant/turn-level
+    required fields (prompt, expected, turns, etc.) are a separate, larger
+    question, not covered here.
+    """
+    problems = []
+    for i, g in enumerate(guardrails):
+        locator = g["name"] if "name" in g else f"<guardrail at index {i}, no name>"
+        for field in REQUIRED_GUARDRAIL_FIELDS:
+            if field not in g:
+                problems.append(f"guardrail '{locator}': missing required field '{field}'")
+    return problems
+
+
 def pick_headline_result(results: list[str]) -> str:
     """
     Select the most severe verdict from a list of PASS/FAIL/REVIEW results.
@@ -760,20 +792,24 @@ def pick_headline_result(results: list[str]) -> str:
 
 def decide_exit_code(non_forced_failed: int, anomalous: int) -> int:
     """
-    Exit code contract (v5 Step 3, item 4). Three distinct codes, not two:
-    a genuine guardrail FAIL is a statement about the agent; an anomaly is
+    Exit code contract (v5 Step 3, item 4; extended v5 Step 4 with code 3).
+    A genuine guardrail FAIL is a statement about the agent; an anomaly is
     a statement about the tool (pick_headline_result() couldn't resolve a
-    headline verdict). Collapsing them into one non-zero code would put a
-    CI operator seeing red in the position of investigating the wrong
-    system. Forced (force_fail) results are demonstration-only and were
-    never a measurement, so they must already be excluded from
-    non_forced_failed before calling this.
+    headline verdict); a config error means no scenario ran at all.
+    Collapsing any of these into one non-zero code would put a CI operator
+    seeing red in the position of investigating the wrong thing. Forced
+    (force_fail) results are demonstration-only and were never a
+    measurement, so they must already be excluded from non_forced_failed
+    before calling this.
 
       0 — clean
       1 — a genuine (non-forced) guardrail FAIL, no anomaly present
       2 — an anomalous (unrecognized-verdict) result present, regardless
           of FAIL count — a run containing one can't be trusted to have
           correctly counted the FAILs either, so it takes precedence
+      3 — a config error caught before any scenario ran (invalid tag,
+          missing required field). This function never returns 3 — see
+          EXIT_CONFIG_ERROR and main()'s pre-run validation instead.
     """
     if anomalous > 0:
         return 2
@@ -1215,6 +1251,16 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
                 all_runs = r.get("runs", [])
                 result_icon = {"PASS": "✅", "FAIL": "❌", "REVIEW": "🔍"}.get(r["result"], "?")
 
+                if r.get("errored"):
+                    lines.append(
+                        f"**Scenario:** `{r['scenario_id']}` (multi-turn) | "
+                        f"{result_icon} **{r['result']}** — errored before any turn was evaluated"
+                    )
+                    lines.append("")
+                    lines.append(f"> {r.get('reasoning', 'Exception during multi-turn run.')}")
+                    lines.append("")
+                    continue
+
                 # Build collapse summary string
                 if len(all_runs) > 1:
                     stability = r.get("stability", "")
@@ -1339,7 +1385,7 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
             # Show failing and unstable responses
             all_entries = [r] + r.get("variants", [])
             for entry in all_entries:
-                if entry["result"] in ("FAIL", "REVIEW") or entry.get("stability") == "Mixed":
+                if entry["result"] in ("FAIL", "REVIEW", ANOMALOUS_VERDICT) or entry.get("stability") == "Mixed":
                     detail_lines = [
                         f"<details>",
                         f"<summary><code>{entry['scenario_id']}</code> ({entry.get('framing', 'baseline')}) — prompt & response</summary>",
@@ -1536,15 +1582,19 @@ def main():
                 g["system_prompt"] = domain_prompt
         print(f"Loaded {len(guardrails)} guardrails from {args.guardrails}")
 
-    # Validate every tag before any scenario runs — a tag typo is a config
-    # error, fully knowable before a single API call, so the run refuses to
-    # start rather than surfacing it buried in one scenario's result later.
-    tag_problems = find_invalid_tags(guardrails)
-    if tag_problems:
-        print("Error: invalid tag value(s) — fix before running:")
-        for p in tag_problems:
+    # Validate the guardrails file before any scenario runs — a tag typo or
+    # missing required field is a config error, fully knowable before a
+    # single API call, so the run refuses to start entirely rather than
+    # surfacing it buried in one scenario's result later (or, for a missing
+    # field, crashing mid-run with no report saved at all). Both checks run
+    # and report together so a fix-and-rerun cycle catches every problem in
+    # one pass, not one error type at a time.
+    config_problems = find_invalid_tags(guardrails) + find_missing_required_fields(guardrails)
+    if config_problems:
+        print("Error: guardrails file has config error(s) — fix before running:")
+        for p in config_problems:
             print(f"  - {p}")
-        sys.exit(1)
+        sys.exit(EXIT_CONFIG_ERROR)
 
     # Init Anthropic client (skipped in --mock mode; required for --mock-agent and live)
     client = None
@@ -1636,7 +1686,11 @@ def main():
                         "prompt": f"[multi-turn: {len(scenario.get('turns', []))} turns]",
                         "expected": "refusal",
                         "response": f"ERROR: {e}",
-                        "result": "REVIEW",
+                        "result": ANOMALOUS_VERDICT,
+                        # A failed measurement, not an unmeasured one — belongs in the
+                        # Anomalous bucket, not falling through the reliability
+                        # partition uncounted for lack of a stability value at all.
+                        "stability": "Anomalous",
                         "reasoning": f"Exception during multi-turn run: {e}",
                         "notes": scenario.get("notes", ""),
                         "mock": args.mock,
@@ -1645,6 +1699,14 @@ def main():
                         "propensity_flags": [],
                         "variants": [],
                         "consistency": "Error",
+                        # Explicit marker the renderer branches on, rather than inferring
+                        # error state from an empty per_turn_results — a genuinely-evaluated
+                        # run never has an empty turn list, but relying on that incidentally
+                        # would make the error state invisible the moment anything else in
+                        # this dict changes shape.
+                        "errored": True,
+                        "per_turn_results": [],
+                        "collapse_point": None,
                     })
                 continue
 
@@ -1786,7 +1848,10 @@ def main():
                     "prompt": prompt,
                     "expected": expected,
                     "response": f"ERROR: {e}",
-                    "result": "REVIEW",
+                    "result": ANOMALOUS_VERDICT,
+                    # A failed measurement, not an unmeasured one — same reasoning as
+                    # the multi-turn except-block above.
+                    "stability": "Anomalous",
                     "reasoning": f"Exception during API call: {e}",
                     "notes": notes,
                     "mock": args.mock,
