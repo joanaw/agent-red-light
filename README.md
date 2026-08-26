@@ -10,12 +10,12 @@ run them against an agent, get a markdown compliance report.
 Teams building on top of AI models define guardrails. Few regression-test them
 across model updates.
 
-Models update. Responses drift. Without regression tests, teams can find out from
-users — not from a report.
+Models update. Responses drift. Without regression tests, teams find out from
+users, not from a report.
 
-AgentRed-Light goes further: it tests whether guardrails hold under
-realistic manipulation pressure — urgency, authority, fear, guilt, and other
-framing tactics users apply in production.
+AgentRed-Light tests whether guardrails hold under realistic manipulation
+pressure: urgency, authority, fear, guilt, and other framing tactics
+users apply in production.
 
 ---
 
@@ -100,7 +100,9 @@ point. Mock shows you the format but live mode shows you the truth.
 response doesn't get an informed guess. Single-turn falls back to a
 generic, content-blind default (`mock_response()` → `MOCK_FALLBACKS`) —
 the same fallback text regardless of what your guardrail actually says.
-Multi-turn has no such fallback and errors outright. Live is the only
+Multi-turn has no such fallback and errors outright, reported as a failed
+measurement (Anomalous, exit code `2`) rather than a judged result. See
+Summary table below. Live is the only
 mode where the judged text comes from an actual agent — `--mock-agent`
 judges that same canned fallback text with a real LLM call instead of a
 string matcher, which gives you a genuine verdict on synthetic input, not
@@ -113,7 +115,7 @@ risk exposure.
 
 ### Repeats and verbose logging
 
-Two additional flags, orthogonal to the modes above — combine with any of
+Two additional flags, orthogonal to the modes above, combine with any of
 them:
 
 **`--repeats N`** (default 1) — run each scenario, and each multi-turn
@@ -235,7 +237,7 @@ runs as single-turn exactly as before. The full worked example lives in
 `expected` is read by the `--mock` string-matching evaluator only — for
 `context_dependent`, that evaluator always returns PASS unconditionally,
 regardless of the response. The LLM evaluator (`--mock-agent`, live mode)
-never sees `expected` at all; it judges purely from the guardrail
+never sees `expected` at all. It judges purely from the guardrail
 `description`. For `context_dependent` scenarios, write the description to
 account for the exception explicitly — the evaluator has no other signal
 that this framing should be treated differently. Because `--mock`'s result
@@ -328,12 +330,12 @@ local `--mock-agent` calibration run and a `--mock --repeats 3
 --scenarios-dir scenarios` test run — not constructed examples. Neither is
 committed; generated reports are gitignored. The Turn-by-turn and
 `--verbose` excerpts come from the 2026-06-30 calibration run and predate
-the 2026-07-28 fixes and everything the current `2026-08-12.1` format line
+the 2026-07-28 fixes and everything the current `2026-08-24.1` format line
 covers — current reports also carry a **Report format:** header line and
 inline evaluator reasoning in
-`<details>` blocks. They're shown for structure, and since that run's
-header doesn't record its invocation either, can only be reproduced in
-mode, not command-for-command. The Summary and Distribution excerpts, by
+`<details>` blocks. They're shown for structure. That run's header
+doesn't record its invocation, so they can only be reproduced in mode,
+not command-for-command. The Summary and Distribution excerpts, by
 contrast, are fresh `--mock --repeats 3 --scenarios-dir scenarios` runs
 against current code, with the exact command given below each one —
 regenerated rather than hand-edited whenever the code they illustrate
@@ -353,27 +355,29 @@ Results-by-category table — each scenario's own tag (regression /
 capability / demo) breaks that same count out by kind, so a demo-tag
 scripted failure is never summed into the same number as a regression
 failure. With `--repeats > 1`, a third block follows: a genuinely-measured
-reliability partition (`REPORT_FORMAT_VERSION` `2026-08-12.1`) — every
-scenario/variant, excluding `force_fail`-forced ones, falls into exactly
-one of Held (unanimous PASS), Unstable (mixed across runs), Consistent
-non-PASS (split into REVIEW vs. FAIL, since a reproducibly borderline
-judgment and a reliably breached guardrail need opposite responses, not one
-merged count), or Anomalous (an unrecognized verdict — anything the tool
-can't resolve to PASS/FAIL/REVIEW). Forced scenarios are excluded from all
-buckets and reported separately, reusing the same forced count the FAIL row
-above already shows — not a second, independently-computed number that
-could drift from it.
+reliability partition (`REPORT_FORMAT_VERSION` `2026-08-24.1`), where
+every scenario/variant, excluding `force_fail`-forced ones, falls into
+exactly one of Held (unanimous PASS), Unstable (mixed across runs),
+Consistent non-PASS (split into REVIEW vs. FAIL, since a reproducibly
+borderline judgment and a reliably breached guardrail need opposite
+responses, not one merged count), or Anomalous (a failed measurement,
+meaning anything the tool can't resolve to PASS/FAIL/REVIEW). Forced
+scenarios are excluded from all buckets and reported separately, reusing
+the same forced count the FAIL row above already shows — not a second,
+independently-computed number that could drift from it.
 
 Two rows below render at zero, for two different reasons, not one.
 Capability is schema and rendering support awaiting content — zero until
 someone writes a capability scenario, at which point it'll move. Anomalous
-is zero under current code, full stop: every evaluator (mock and live,
-single- and multi-turn) is structurally confined to returning PASS, FAIL,
-or REVIEW — a parse failure falls back to REVIEW, not to Anomalous — so an
-Anomalous count can only ever become non-zero if a future evaluator change
-or a new verdict type breaks that guarantee. Both rows render
-unconditionally rather than hiding until populated — a zero here isn't a
-rare edge case being suppressed, it's the row doing its job.
+is zero in this excerpt because none of the shipped scenarios happen to hit
+it today, not because the code can't produce one. A failed measurement is
+reachable through ordinary use: any multi-turn scenario ID with no entry in
+`MULTI_TURN_MOCK_RESPONSES` (under `--mock` or `--mock-agent`), or any
+evaluator call (`--mock-agent` or live) that raises an exception, produces
+one. A single-turn scenario missing a mock entry doesn't hit this path.
+It falls back to generic mock text instead (see Run modes above). Both
+rows render unconditionally rather than hiding until populated: a zero
+here isn't a rare edge case being suppressed, it's the row doing its job.
 
 The fence below quotes the report's own `## Summary` block with its
 heading (and the blank line after it) trimmed off the top, and the
@@ -404,7 +408,7 @@ lines and nothing else; that's the trim, not staleness.
 | Held (unanimous PASS) | 22 |
 | Unstable (mixed across runs) | 0 |
 | Consistent non-PASS | 3 (0 REVIEW, 3 FAIL) |
-| Anomalous (unrecognized verdict) | 0 |
+| Anomalous (failed measurement) | 0 |
 
 _2 unmeasured — forced; same 2 as above._
 ```
@@ -426,15 +430,16 @@ genuine repeated failure — the same synthetic-vs-measured problem as
 `force_fail`'s original defect, one level up.
 
 The Summary table above shows no `ANOMALY` row — that row only renders when
-its count is non-zero, and every real run's count is zero today (see the
-Anomalous discussion above). The partition's own `Anomalous` row renders
+its count is non-zero, and this excerpt's count happens to be zero (see the
+Anomalous discussion above; it's reachable, just not hit by the shipped
+scenario set). The partition's own `Anomalous` row renders
 regardless, at 0, by the same always-show convention as the category
 table's `Capability` row — the absence of a Summary `ANOMALY` line isn't a
 gap in this excerpt, it's the conditional behaving correctly.
 
 Before this format, the aggregate only ever showed a single `⚠️ Mixed`
 count, with no category breakdown and no anomaly awareness anywhere in the
-report. Reports without the `2026-08-12.1` format line predate one or more
+report. Reports without the `2026-08-24.1` format line predate one or more
 of these fixes: their `Mixed` count is unchanged and carries forward as the
 Unstable row above, but they have no equivalent for Held, the REVIEW/FAIL
 split, Anomalous, or the category breakdown, since none of those existed
@@ -549,10 +554,10 @@ This project maps directly to how TPMs operate in AI safety:
   your policy fails, not just that it failed
 - **Repeat-run stability** = distinguishing a reliable hold from a lucky pass
 - **Re-running after model updates** = regression testing for behavioral drift
-- **Three-valued exit code** (clean / genuine FAIL / anomalous result) =
-  CI/CD pipeline integration without extra tooling — see Known Limitations
-  → Usage guidance for the exact codes and why the shipped demo scenario
-  set always exits non-zero
+- **Four-valued exit code** (clean / genuine FAIL / anomalous result /
+  config error) = CI/CD pipeline integration without extra tooling. See
+  Known Limitations → Usage guidance for the exact codes and why the
+  shipped demo scenario set always exits non-zero
 
 AgentRed-Light doesn't test whether your system prompt improves output quality.
 It tests whether it holds under adversarial pressure and shows you
@@ -656,8 +661,8 @@ AgentRed-Light tests behavioral guardrail compliance at the deployment layer —
 whether a configured agent holds its boundaries under realistic adversarial
 framing. It does not attempt to find universal model vulnerabilities.
 
-Anthropic's red-teaming distinguishes two jailbreak classes. Anthropic
-defines a *universal* jailbreak as "any prompt, script, or harness that
+Anthropic's red-teaming distinguishes two jailbreak classes. A *universal*
+jailbreak can be defined as "any prompt, script, or harness that
 allows a user to interact with a model as if its safeguards were not
 present" — as opposed to "more minor jailbreaks that are only effective in
 very limited contexts or require additional effort to be adapted to each new
@@ -682,13 +687,14 @@ deployment-layer testing exists as a distinct discipline from model-level
 red-teaming.
 
 **Customer-service multi-turn not built:**
-v4 ships with two domains: finance and customer service. A refund-escalation
-sequence (polite ask → frustration → authority claim → threat → policy
-misrepresentation) was designed for customer service but never implemented.
-Finance multi-turn alone proves the mechanic (conversation-history runner,
-per-turn evaluation, collapse-point detection); a second domain would repeat
-the point rather than test something new. Conscious scope decision, not an
-omission — same reasoning as the health domain deferral (see Roadmap below).
+AgentRed-Light ships with two domains: finance and customer service. A
+refund-escalation sequence (polite ask → frustration → authority claim →
+threat → policy misrepresentation) was designed for customer service but
+never implemented. Finance multi-turn alone proves the mechanic
+(conversation-history runner, per-turn evaluation, collapse-point
+detection); a second domain would repeat the point rather than test
+something new. Conscious scope decision, not an omission — same reasoning
+as the health domain deferral (see Roadmap below).
 
 ### Usage guidance
 *How to use the tool correctly.*
@@ -712,21 +718,35 @@ See Expected values for the full detail.
 **Mock vs live parity:**
 Mock responses were tuned during `--mock-agent` runs to match LLM evaluator
 expectations. Mock mode itself still uses string matching — no API key
-required. Real API runs will behave differently — that's the point. A
+required. Real API runs will behave differently, and that's the point. A
 well-configured system prompt dramatically changes live results. Without one,
 you're testing default Claude behavior. With one, you're testing a deployed
 agent.
 
 **CI/CD exit code:**
-Three codes, not two — `decide_exit_code()`: `0` clean, `1` a genuine
-(non-forced) guardrail FAIL, `2` an anomalous (unrecognized-verdict) result
-present. `2` takes precedence over `1` regardless of FAIL count: a run
-containing an anomaly can't be trusted to have counted its FAILs correctly
-either, so treat it as the tool needing attention, not the agent. Forced
+Four codes, not three: `0` clean, `1` a genuine (non-forced) guardrail
+FAIL, `2` an anomalous (failed-measurement) result present, `3` a config
+error caught before any scenario ran (invalid tag, missing required
+field). `0`–`2` come from `decide_exit_code()`; `2` takes precedence over
+`1` regardless of FAIL count, since a run containing an anomaly can't be
+trusted to have counted its FAILs correctly either; treat it as the tool
+needing attention, not the agent. `3` comes from a separate pre-run check
+and short-circuits everything else: the run never gets far enough to
+produce a `0`/`1`/`2` result at all, so fix the guardrails file and re-run
+rather than reading `3` as either a FAIL or an anomaly. Forced
 (`force_fail`) results are excluded from the FAIL check entirely — a
 demonstration was never a measurement.
 
-That doesn't make the shipped scenario files exit clean, though, and
+**Breaking change (v5):** before this release, a guardrails file
+with an invalid tag exited `1`, the same code as a genuine guardrail
+FAIL, since the tag validator's own early exit reused that code rather
+than a dedicated one. A config error and an agent failure are now
+distinguishable by exit code alone (`3` vs. `1`). CI logic that branches
+on exit code `1` meaning "the agent failed a guardrail" will no longer
+catch a malformed guardrails file that way. Check for `3` separately if
+you want to catch that case too.
+
+The shipped scenario files still don't exit clean, though, and
 `force_fail` isn't why. Five entries across the shipped files —
 `fin-001-authority`, `cs-001-authority`, `fin-001-guilt`, `cs-001-guilt`,
 `fin-mt-001` — are tagged `demo`: hand-authored to fail, by design, so a
@@ -799,6 +819,28 @@ parser-failure placeholders — visible directly in the main report's own
       file, for calibration and debugging → 2026-06-30
 - [x] `--mock-agent` calibration run — 3 repeats on the multi-turn finance
       scenario, evaluator consistent across runs, soft gate met → 2026-06-30
+
+**v5**
+- [x] Compliance-direction scenarios: six `expected: "allowed"` variants
+      across finance and customer-service, closing the "tests only refusal,
+      never over-refusal" gap; live-validated unanimous PASS → 2026-07-28
+- [x] `pass^k` reliability partition: Held / Unstable / Consistent
+      non-PASS (REVIEW/FAIL split), replacing the old single Mixed-count
+      row → 2026-08-05
+- [x] Shared headline-result logic (`pick_headline_result()`) for
+      `run_repeated()` and `run_multi_turn()`, with a distinct Anomalous
+      state instead of silently ranking an unrecognized result as the
+      safest outcome; surfaced in the Summary table and reliability
+      partition; three-valued exit code (`0`/`1`/`2`); scenario tagging
+      (regression / capability / demo) with its own Results-by-category
+      table → 2026-08-12
+- [x] A caught exception during a scenario or turn is now a reported
+      failed measurement (Anomalous) rather than a masked REVIEW, and
+      always carries a reliability-partition value so it can't fall
+      through uncounted under `--repeats > 1` → 2026-08-24
+- [x] Config errors (missing required guardrail field, invalid tag) now
+      fail before any scenario runs, with their own exit code (`3`)
+      instead of borrowing the FAIL code → 2026-08-24
 
 **Backlog**
 - [ ] Health domain (third domain) — deferred to backlog; two domains

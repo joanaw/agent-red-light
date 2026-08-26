@@ -22,27 +22,36 @@ import anthropic
 # older report is itself the signal, not missing metadata — say so explicitly
 # so a reader doesn't have to reconstruct the history to know what it means.
 REPORT_FORMAT_VERSION = (
-    "2026-08-12.1 — reasoning captured for every run, forced verdicts labeled, "
+    "2026-08-24.1 — reasoning captured for every run, forced verdicts labeled, "
     "and (repeats > 1) a genuinely-measured reliability partition (Held / "
     "Unstable / Consistent non-PASS, forced excluded) replaces the old single "
     "Mixed-count row. Each scenario's tag (regression / capability / demo) is "
     "broken out into its own Results-by-category table, so a demo-tag scripted "
-    "failure is never summed into the same count as a regression failure. An "
-    "unrecognized verdict (anything pick_headline_result() can't resolve to "
-    "PASS/FAIL/REVIEW — an evaluator parse failure falls back to REVIEW, not "
-    "this) is now "
-    "surfaced as its own Anomalous count, in both the Summary table and the "
-    "reliability partition, instead of silently resolving to the least-severe "
-    "known verdict. Reports without this line predate one or more of these "
-    "fixes: treat any REVIEW result in them as unverifiable (reasoning wasn't "
-    "captured), treat any PASS in a repeats > 1 or multi-turn report as unable "
-    "to rule out a masked anomaly, and treat any FAIL/PASS count as an "
-    "undifferentiated mix of demo and regression scenarios — the underlying "
-    "data can't be reconstructed after the fact either way. An older report's "
-    "Mixed count is unchanged and carries forward as this format's Unstable "
-    "row — but it has no equivalent for Held, the REVIEW/FAIL split within "
-    "Consistent non-PASS, Anomalous, or the category breakdown, since none of "
-    "those existed before their respective fixes."
+    "failure is never summed into the same count as a regression failure. A "
+    "failed measurement — anything pick_headline_result() can't resolve to "
+    "PASS/FAIL/REVIEW (an evaluator parse failure falls back to REVIEW, not "
+    "this), or a caught exception during a scenario or turn, now routed here "
+    "instead of a hardcoded REVIEW — is surfaced as its own Anomalous count, "
+    "in both the Summary table and the reliability partition, instead of "
+    "silently resolving to the least-severe known verdict or hiding inside an "
+    "unmarked REVIEW. A multi-turn scenario that errors before any turn is "
+    "evaluated now renders as its own explicit block stating the exception "
+    "text, never as a false 'Held across all turns' beside an honest REVIEW "
+    "verdict. And under repeats > 1, an errored entry always carries an "
+    "explicit stability value, so it can no longer fall through the "
+    "reliability partition uncounted. Reports without this line predate one "
+    "or more of these fixes: treat any REVIEW result in them as unverifiable "
+    "(reasoning wasn't captured, and a caught exception may be hiding inside "
+    "it as an unmarked REVIEW), treat any PASS in a repeats > 1 or multi-turn "
+    "report as unable to rule out a masked anomaly, treat any FAIL/PASS count "
+    "as an undifferentiated mix of demo and regression scenarios, and treat "
+    "any multi-turn 'Held' result as unable to rule out an unrendered "
+    "exception — the underlying data can't be reconstructed after the fact "
+    "either way. An older report's Mixed count is unchanged and carries "
+    "forward as this format's Unstable row — but it has no equivalent for "
+    "Held, the REVIEW/FAIL split within Consistent non-PASS, Anomalous, the "
+    "category breakdown, or a distinguishable errored multi-turn entry, "
+    "since none of those existed before their respective fixes."
 )
 
 
@@ -804,7 +813,7 @@ def decide_exit_code(non_forced_failed: int, anomalous: int) -> int:
 
       0 — clean
       1 — a genuine (non-forced) guardrail FAIL, no anomaly present
-      2 — an anomalous (unrecognized-verdict) result present, regardless
+      2 — an anomalous (failed-measurement) result present, regardless
           of FAIL count — a run containing one can't be trusted to have
           correctly counted the FAILs either, so it takes precedence
       3 — a config error caught before any scenario ran (invalid tag,
@@ -1170,7 +1179,7 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
         f"| 🔍 REVIEW | {review} |",
     ]
     if anomalous:
-        lines.append(f"| ⚠️ ANOMALY (unrecognized verdict) | {anomalous} |")
+        lines.append(f"| ⚠️ ANOMALY (failed measurement) | {anomalous} |")
     lines.append("")
 
     # All three rows always shown, even at 0 — same convention as the
@@ -1202,7 +1211,7 @@ def generate_report(results: list[dict], guardrails: list[dict], run_mode: str =
             f"| Held (unanimous PASS) | {held} |",
             f"| Unstable (mixed across runs) | {unstable} |",
             f"| Consistent non-PASS | {consistent_non_pass} ({consistent_review} REVIEW, {consistent_fail} FAIL) |",
-            f"| Anomalous (unrecognized verdict) | {anomalous_entries} |",
+            f"| Anomalous (failed measurement) | {anomalous_entries} |",
             f"",
         ]
         if unmeasured:
